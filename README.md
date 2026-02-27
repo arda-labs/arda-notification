@@ -185,7 +185,11 @@ psql -h localhost -U postgres -d arda_notification \
 
 ### 1. Tạo Keycloak client `arda-notification-service`
 
-Chạy script có sẵn — idempotent, safe to re-run:
+Service cần gọi Keycloak Admin REST API để resolve fan-out targets. Cần tạo client **service account** trong realm `master`.
+
+**Cách 1: Chạy script có sẵn (Khuyên dùng)**
+
+Chạy script idempotent, safe to re-run:
 
 ```bash
 # Keycloak phải đang chạy trước (docker compose up arda-keycloak)
@@ -194,74 +198,18 @@ bash arda-infra-config/scripts/setup-keycloak-notification-client.sh
 
 Script sẽ tự động:
 
-1. Đăng nhập Keycloak bằng admin credentials
-2. Tạo client `arda-notification-service` (confidential, service accounts enabled)
-3. Gán role `view-users` và `query-realms` từ client `realm-management`
-4. In ra **Client Secret** để điền vào `docker-compose.yml`
+1. Đăng nhập Keycloak bằng admin credentials.
+2. Tạo client `arda-notification-service` (confidential, service accounts enabled).
+3. Gán role `view-users` và `query-realms` từ client `realm-management`.
+4. In ra **Client Secret** để điền vào `docker-compose.yml`.
 
-> **Override** URL/credentials nếu khác default:
+> **Override** URL/credentials nếu cần:
 >
 > ```bash
-> KEYCLOAK_URL=http://localhost:8081 \
-> KEYCLOAK_ADMIN=admin \
-> KEYCLOAK_ADMIN_PASSWORD=admin \
-> bash scripts/setup-keycloak-notification-client.sh
+> KEYCLOAK_URL=http://localhost:8081 KEYCLOAK_ADMIN=admin KEYCLOAK_ADMIN_PASSWORD=admin bash scripts/setup-keycloak-notification-client.sh
 > ```
 
----
-
-### 2. Cập nhật `KEYCLOAK_ADMIN_CLIENT_SECRET` trong docker-compose
-
-File [`docker-compose.yml`](../arda-infra-config/docker-compose/docker-compose.yml) đã có placeholder:
-
-```yaml
-# arda-infra-config/docker-compose/docker-compose.yml
-arda-notification:
-  environment:
-    - KEYCLOAK_ADMIN_REALM=master
-    - KEYCLOAK_ADMIN_CLIENT_ID=arda-notification-service
-    - KEYCLOAK_ADMIN_CLIENT_SECRET=change-me-run-setup-script # ← thay bằng secret thật
-```
-
-Sau khi chạy script ở bước 1, copy secret và thay vào đây:
-
-```bash
-# Chạy lại script để xem secret (nếu quên)
-bash arda-infra-config/scripts/setup-keycloak-notification-client.sh
-```
-
----
-
-### 3. Fix môi trường `go mod tidy` (proxy/internet)
-
-Hiện tại `go mod tidy` bị lỗi do không resolve được revision của `golang.org/x/exp`:
-
-```
-golang.org/x/exp@v0.0.0-20241217172543-b2144cdd0a42: invalid version: unknown revision
-```
-
-**Cách fix (chọn 1 trong 3):**
-
-```bash
-# Option A: Dùng proxy của Google (nếu có internet)
-$env:GOPROXY = "https://proxy.golang.org,direct"
-go mod tidy
-
-# Option B: Dùng Athens (self-hosted Go module proxy)
-$env:GOPROXY = "http://athens:3000,direct"
-go mod tidy
-
-# Option C: Bỏ qua sum check
-$env:GONOSUMCHECK = "*"
-$env:GOFLAGS = "-mod=mod"
-go mod tidy
-```
-
-Sau khi tidy thành công, commit cả `go.mod` và `go.sum`.
-
-### 1. Tạo Keycloak client `arda-notification-service`
-
-Service cần gọi Keycloak Admin REST API để resolve fan-out targets. Cần tạo client **service account** trong realm `master`:
+**Cách 2: Cài đặt thủ công (GUI)**
 
 ```
 Keycloak Admin Console
@@ -274,19 +222,16 @@ Keycloak Admin Console
 
   → Tab "Service account roles"
       → Assign role: "view-users" (realm-management client)
-      → Assign role: "query-realms" (master realm — cần để list all realms cho PLATFORM scope)
+      → Assign role: "query-realms" (master realm)
 ```
 
-> **Lưu ý**: Role `view-users` thuộc client `realm-management`, không phải realm role.  
-> Vào: Clients → `realm-management` → Roles → `view-users` → Assign to service account.
-
-Sau khi tạo client, copy **Client Secret** ở tab "Credentials".
+> **Lưu ý**: Role `view-users` thuộc client `realm-management`. Vào: Clients → `realm-management` → Roles → `view-users` → Assign to service account.
 
 ---
 
-### 2. Set `KEYCLOAK_ADMIN_CLIENT_SECRET` trong docker-compose
+### 2. Cấu hình `KEYCLOAK_ADMIN_CLIENT_SECRET`
 
-Mở file `docker-compose.yml` (hoặc `docker-compose.override.yml`) và thêm:
+Sau khi có Client Secret, cập nhật vào file `docker-compose.yml` hoặc dùng `.env`:
 
 ```yaml
 services:
@@ -295,46 +240,7 @@ services:
       KEYCLOAK_URL: "http://keycloak:8080"
       KEYCLOAK_ADMIN_REALM: "master"
       KEYCLOAK_ADMIN_CLIENT_ID: "arda-notification-service"
-      KEYCLOAK_ADMIN_CLIENT_SECRET: "<secret-from-keycloak>"
+      KEYCLOAK_ADMIN_CLIENT_SECRET: "your-secret-here"
 ```
 
-> **Không commit secret vào git.** Dùng `.env` file hoặc Docker secrets trong production.
-
-```yaml
-# Khuyến nghị dùng .env
-services:
-  arda-notification:
-    env_file:
-      - .env.notification
-```
-
----
-
-### 3. Fix môi trường `go mod tidy` (proxy/internet)
-
-Hiện tại `go mod tidy` bị lỗi do không resolve được revision của `golang.org/x/exp`:
-
-```
-golang.org/x/exp@v0.0.0-20241217172543-b2144cdd0a42: invalid version: unknown revision
-```
-
-**Nguyên nhân**: Môi trường dev không có internet trực tiếp hoặc GOPROXY chưa cấu hình đúng.
-
-**Cách fix (chọn 1 trong 3):**
-
-```bash
-# Option A: Dùng proxy của Google (nếu có internet)
-$env:GOPROXY = "https://proxy.golang.org,direct"
-go mod tidy
-
-# Option B: Dùng Athens (self-hosted Go module proxy)
-$env:GOPROXY = "http://athens:3000,direct"
-go mod tidy
-
-# Option C: Dùng GONOSUMCHECK nếu dùng private proxy
-$env:GONOSUMCHECK = "*"
-$env:GOFLAGS = "-mod=mod"
-go mod tidy
-```
-
-Sau khi tidy thành công, commit cả `go.mod` và `go.sum`.
+> **Bảo mật**: Không commit secret vào git. Khuyến nghị dùng file `.env.notification` và thêm vào `.gitignore`.
