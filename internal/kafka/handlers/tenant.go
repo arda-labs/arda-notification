@@ -19,7 +19,6 @@ type tenantEnv struct {
 	EventID     string `json:"eventId"`
 	TenantKey   string `json:"tenantKey"`
 	DisplayName string `json:"displayName"`
-	DbType      string `json:"dbType"`
 	Status      string `json:"status"`
 	CreatedBy   string `json:"createdBy"`
 }
@@ -55,7 +54,7 @@ func handleTenantCreated(data []byte) *domain.FanoutInput {
 	if displayName == "" {
 		displayName = env.TenantKey
 	}
-	title, body := messages.TenantCreated(displayName, env.DbType)
+	title, body := messages.TenantCreated(displayName)
 	return tenantFanout(env, title, body)
 }
 

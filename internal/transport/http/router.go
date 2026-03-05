@@ -7,6 +7,8 @@ import (
 )
 
 // NewRouter sets up all Echo routes and middleware.
+// keycloakBaseURL is kept for backward compatibility but no longer used for auth.
+// Authentication is now handled via X-Internal-Token from APISIX Gateway.
 func NewRouter(h *Handler, keycloakBaseURL string) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
@@ -17,16 +19,16 @@ func NewRouter(h *Handler, keycloakBaseURL string) *echo.Echo {
 	e.Use(middleware.Logger())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins: []string{"*"},
-		AllowHeaders: []string{"Authorization", "Content-Type", "X-Tenant-Key"},
+		AllowHeaders: []string{"Authorization", "Content-Type", "X-Tenant-ID", "X-Internal-Token"},
 		AllowMethods: []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
 	}))
 
 	// Health (no auth required)
 	e.GET("/health", h.Health)
 
-	// API — requires authentication
+	// API — requires authentication via APISIX Internal JWT (X-Internal-Token)
 	v1 := e.Group("")
-	v1.Use(mw.JWTAuth(keycloakBaseURL))
+	v1.Use(mw.InternalJWTAuth())
 	v1.Use(mw.TenantResolver())
 
 	// REST endpoints

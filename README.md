@@ -66,7 +66,7 @@ Kafka Topics
 
 ```
 Authorization: Bearer <keycloak-jwt>
-X-Tenant-Key: <tenant-key>
+X-Tenant-ID: <tenant-key>
 ```
 
 ---
@@ -77,7 +77,7 @@ X-Tenant-Key: <tenant-key>
 const es = new EventSource("/api/notification/v1/notifications/stream", {
   headers: {
     Authorization: `Bearer ${token}`,
-    "X-Tenant-Key": tenantKey,
+    "X-Tenant-ID": tenantKey,
   },
 });
 

@@ -1,150 +1,157 @@
 package mw
 
 import (
-	"context"
-	"encoding/json"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
 
-// jwksCache caches the JWKS per realm to avoid fetching on every request.
-var jwksCache = &sync.Map{}
-
-type cachedJWKS struct {
-	keys    map[string]any
-	fetchAt time.Time
+// InternalJWTClaims are the claims set by APISIX Lua signer.
+type InternalJWTClaims struct {
+	Sub      string   `json:"sub"`
+	TenantID string   `json:"tid"`
+	Username string   `json:"username"`
+	Email    string   `json:"email"`
+	Roles    []string `json:"roles"`
+	Issuer   string   `json:"iss"`
+	jwt.RegisteredClaims
 }
 
-const jwksTTL = 5 * time.Minute
+// internalJWTPublicKey is lazy-loaded and cached.
+var internalJWTPublicKey *rsa.PublicKey
 
-// JWTAuth validates the Bearer token from Keycloak.
-// It extracts tenantKey from the "iss" claim (issuer URL contains the realm name).
-// The validated claims are stored in echo.Context for downstream use.
-func JWTAuth(keycloakBaseURL string) echo.MiddlewareFunc {
+// loadInternalJWTPublicKey loads the RSA public key for verifying Internal JWTs.
+// Key path is read from INTERNAL_JWT_PUBLIC_KEY_PATH env var,
+// or falls back to ./keys/internal-jwt-public.pem
+func loadInternalJWTPublicKey() (*rsa.PublicKey, error) {
+	if internalJWTPublicKey != nil {
+		return internalJWTPublicKey, nil
+	}
+
+	keyPath := os.Getenv("INTERNAL_JWT_PUBLIC_KEY_PATH")
+	if keyPath == "" {
+		keyPath = "/usr/local/apisix/conf/keys/internal-jwt-public.pem"
+	}
+
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read internal JWT public key from %s: %w", keyPath, err)
+	}
+
+	block, _ := pem.Decode(data)
+	if block != nil {
+		// PEM-encoded key
+		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse internal JWT public key PEM: %w", err)
+		}
+		rsaPub, ok := pub.(*rsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("internal JWT public key is not RSA")
+		}
+		internalJWTPublicKey = rsaPub
+	} else {
+		// Base64 DER-encoded (no PEM headers)
+		cleaned := strings.TrimSpace(string(data))
+		cleaned = strings.ReplaceAll(cleaned, "-----BEGIN PUBLIC KEY-----", "")
+		cleaned = strings.ReplaceAll(cleaned, "-----END PUBLIC KEY-----", "")
+		cleaned = strings.Join(strings.Fields(cleaned), "")
+
+		derBytes, err := base64.StdEncoding.DecodeString(cleaned)
+		if err != nil {
+			return nil, fmt.Errorf("decode internal JWT public key base64: %w", err)
+		}
+		pub, err := x509.ParsePKIXPublicKey(derBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse internal JWT public key DER: %w", err)
+		}
+		rsaPub, ok := pub.(*rsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("internal JWT public key is not RSA")
+		}
+		internalJWTPublicKey = rsaPub
+	}
+
+	log.Info().Str("path", keyPath).Msg("Internal JWT public key loaded")
+	return internalJWTPublicKey, nil
+}
+
+// InternalJWTAuth validates the X-Internal-Token header set by APISIX Gateway.
+// This replaces the legacy JWTAuth (Keycloak direct) middleware.
+// Flow: Client → APISIX (verifies Keycloak JWT) → signs X-Internal-Token (RS256) → Service
+func InternalJWTAuth() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			authHeader := c.Request().Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") {
-				return echo.NewHTTPError(http.StatusUnauthorized, "missing bearer token")
+			tokenStr := c.Request().Header.Get("X-Internal-Token")
+			if tokenStr == "" {
+				log.Warn().
+					Str("uri", c.Request().RequestURI).
+					Msg("Missing X-Internal-Token header (expected from APISIX Gateway)")
+				return echo.NewHTTPError(http.StatusUnauthorized, "missing internal token")
 			}
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-			// Parse without verification first to get the issuer (realm)
-			unverified, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
+			pubKey, err := loadInternalJWTPublicKey()
 			if err != nil {
-				return echo.NewHTTPError(http.StatusUnauthorized, "invalid token format")
+				log.Error().Err(err).Msg("Cannot load Internal JWT public key")
+				return echo.NewHTTPError(http.StatusInternalServerError, "authentication configuration error")
 			}
 
-			claims, ok := unverified.Claims.(jwt.MapClaims)
-			if !ok {
-				return echo.NewHTTPError(http.StatusUnauthorized, "invalid claims")
-			}
+			claims := &InternalJWTClaims{}
+			token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+				}
+				return pubKey, nil
+			}, jwt.WithIssuedAt(), jwt.WithExpirationRequired())
 
-			issuer, _ := claims["iss"].(string)
-			userID, _ := claims["sub"].(string)
-
-			// Extract realm name from issuer URL: .../realms/{realm}
-			realm := extractRealm(issuer)
-			if realm == "" {
-				return echo.NewHTTPError(http.StatusUnauthorized, "cannot extract realm from token issuer")
-			}
-
-			// Fetch and verify with JWKS
-			jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", keycloakBaseURL, realm)
-			if err := verifyWithJWKS(jwksURL, tokenStr); err != nil {
-				log.Warn().Err(err).Str("realm", realm).Msg("JWT verification failed")
-				return echo.NewHTTPError(http.StatusUnauthorized, "invalid token signature")
+			if err != nil || !token.Valid {
+				log.Warn().
+					Err(err).
+					Str("uri", c.Request().RequestURI).
+					Msg("Internal JWT verification failed")
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid internal token")
 			}
 
 			// Store validated info in context
-			c.Set("userID", userID)
-			c.Set("realm", realm)
+			c.Set("userID", claims.Sub)
+			c.Set("tenantID", claims.TenantID)
+			c.Set("username", claims.Username)
+			c.Set("email", claims.Email)
+			c.Set("roles", claims.Roles)
+
+			log.Trace().
+				Str("userID", claims.Sub).
+				Str("tenantID", claims.TenantID).
+				Msg("Internal JWT verified")
 
 			return next(c)
 		}
 	}
 }
 
-// TenantResolver resolves the tenantKey from the X-Tenant-Key header.
-// The frontend always sends this header (set by BaseApiClient).
+// TenantResolver resolves the tenantKey from the X-Tenant-ID header or JWT claims.
 func TenantResolver() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			tenantKey := c.Request().Header.Get("X-Tenant-Key")
+			tenantKey := c.Request().Header.Get("X-Tenant-ID")
 			if tenantKey == "" {
-				// Fallback: use realm name from JWT
-				tenantKey, _ = c.Get("realm").(string)
+				// Fallback: use tenantID stored by InternalJWTAuth from JWT claims
+				tenantKey, _ = c.Get("tenantID").(string)
 			}
 			if tenantKey == "" {
-				return echo.NewHTTPError(http.StatusBadRequest, "X-Tenant-Key header is required")
+				return echo.NewHTTPError(http.StatusBadRequest, "X-Tenant-ID header is required")
 			}
 			c.Set("tenantKey", tenantKey)
 			return next(c)
 		}
 	}
-}
-
-func extractRealm(issuer string) string {
-	// issuer format: http://keycloak:8080/realms/{realm}
-	parts := strings.Split(issuer, "/realms/")
-	if len(parts) != 2 {
-		return ""
-	}
-	return strings.TrimSuffix(parts[1], "/")
-}
-
-// verifyWithJWKS fetches the JWKS and verifies the token signature.
-// In production consider a proper JWKS library or caching strategy.
-func verifyWithJWKS(jwksURL, tokenStr string) error {
-	// Simple JWKS fetch with in-memory cache
-	cached, ok := jwksCache.Load(jwksURL)
-	if !ok || time.Since(cached.(*cachedJWKS).fetchAt) > jwksTTL {
-		resp, err := http.Get(jwksURL) //nolint:gosec
-		if err != nil {
-			return fmt.Errorf("fetch jwks: %w", err)
-		}
-		defer resp.Body.Close()
-
-		var jwks struct {
-			Keys []map[string]any `json:"keys"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-			return fmt.Errorf("decode jwks: %w", err)
-		}
-
-		keyMap := make(map[string]any)
-		for _, k := range jwks.Keys {
-			if kid, ok := k["kid"].(string); ok {
-				keyMap[kid] = k
-			}
-		}
-		jwksCache.Store(jwksURL, &cachedJWKS{keys: keyMap, fetchAt: time.Now()})
-	}
-
-	// Minimal parse to check expiry — full RSA verification needs lestrrat-go/jwx
-	// For now we do a basic parse (signature verification via Keycloak introspection is
-	// recommended for production; this validates structure and expiry).
-	ctx := context.Background()
-	_ = ctx
-
-	_, err := jwt.Parse(tokenStr, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		// For full implementation use lestrrat-go/jwx to parse RSA keys from JWKS
-		// This is a placeholder that accepts the token structure
-		return jwt.UnsafeAllowNoneSignatureType, fmt.Errorf("use lestrrat-go/jwx for production JWKS verification")
-	})
-
-	// In dev environment, we accept valid structure
-	// Production: replace with proper JWKS RSA verification
-	_ = err
-	return nil
 }

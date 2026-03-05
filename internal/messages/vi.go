@@ -4,7 +4,7 @@ package messages
 
 const (
 	TenantCreatedTitle = "Tenant mới đã được khởi tạo"
-	TenantCreatedBody  = "Tenant '%s' (DB: %s) đã được tạo thành công."
+	TenantCreatedBody  = "Tenant '%s' đã được tạo thành công."
 
 	TenantUpdatedTitle = "Tenant đã được cập nhật"
 	TenantUpdatedBody  = "Cấu hình của tenant '%s' đã được cập nhật thành công."

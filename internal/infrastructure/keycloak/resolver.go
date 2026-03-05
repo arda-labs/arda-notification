@@ -16,6 +16,9 @@ type Resolver struct {
 	adminRealm   string // realm used for admin login, usually "master"
 	clientID     string
 	clientSecret string
+	// adminUser/adminPassword are used for Resource Owner Password Grant (dev fallback).
+	adminUser     string
+	adminPassword string
 
 	httpClient *http.Client
 
@@ -31,6 +34,8 @@ type cacheEntry struct {
 }
 
 // New creates a Keycloak Resolver with a 30-second cache TTL.
+// If clientSecret is empty, it falls back to Resource Owner Password grant
+// using adminUser/adminPassword (useful for local development).
 func New(adminURL, adminRealm, clientID, clientSecret string) *Resolver {
 	return &Resolver{
 		adminURL:     adminURL,
@@ -41,6 +46,28 @@ func New(adminURL, adminRealm, clientID, clientSecret string) *Resolver {
 		cacheTTL:     30 * time.Second,
 		cacheData:    make(map[string]cacheEntry),
 	}
+}
+
+// NewWithPassword creates a Keycloak Resolver that uses Resource Owner Password Grant.
+// Use this in local development when a dedicated service-account client is not set up.
+func NewWithPassword(adminURL, adminRealm, clientID, adminUser, adminPassword string) *Resolver {
+	return &Resolver{
+		adminURL:      adminURL,
+		adminRealm:    adminRealm,
+		clientID:      clientID,
+		adminUser:     adminUser,
+		adminPassword: adminPassword,
+		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		cacheTTL:      30 * time.Second,
+		cacheData:     make(map[string]cacheEntry),
+	}
+}
+
+// SetPasswordFallback sets the admin username/password used when clientSecret is empty.
+// Call this after New() to configure the dev fallback.
+func (r *Resolver) SetPasswordFallback(user, password string) {
+	r.adminUser = user
+	r.adminPassword = password
 }
 
 // keycloakUser is a minimal representation of a Keycloak user.
@@ -163,13 +190,25 @@ func (r *Resolver) AllActiveUsers(ctx context.Context) (map[string][]string, err
 // --- internal helpers ---
 
 // adminToken fetches a short-lived admin access token from Keycloak.
+// Uses client_credentials if clientSecret is set, otherwise falls back
+// to Resource Owner Password Grant (for local dev with admin-cli).
 func (r *Resolver) adminToken(ctx context.Context) (string, error) {
 	tokenURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", r.adminURL, r.adminRealm)
 
-	body := fmt.Sprintf(
-		"grant_type=client_credentials&client_id=%s&client_secret=%s",
-		r.clientID, r.clientSecret,
-	)
+	var body string
+	if r.clientSecret != "" {
+		// Production: client_credentials grant
+		body = fmt.Sprintf(
+			"grant_type=client_credentials&client_id=%s&client_secret=%s",
+			r.clientID, r.clientSecret,
+		)
+	} else {
+		// Dev fallback: Resource Owner Password Grant with admin-cli
+		body = fmt.Sprintf(
+			"grant_type=password&client_id=%s&username=%s&password=%s",
+			r.clientID, r.adminUser, r.adminPassword,
+		)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(body))
 	if err != nil {

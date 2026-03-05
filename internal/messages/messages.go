@@ -4,8 +4,8 @@ import "fmt"
 
 // ─── Tenant builders ─────────────────────────────────────────────────────────
 
-func TenantCreated(displayName, dbType string) (string, string) {
-	return TenantCreatedTitle, fmt.Sprintf(TenantCreatedBody, displayName, dbType)
+func TenantCreated(displayName string) (string, string) {
+	return TenantCreatedTitle, fmt.Sprintf(TenantCreatedBody, displayName)
 }
 
 func TenantUpdated(displayName string) (string, string) {

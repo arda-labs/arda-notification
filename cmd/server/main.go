@@ -72,6 +72,8 @@ func main() {
 		cfg.Keycloak.AdminClientID,
 		cfg.Keycloak.AdminClientSecret,
 	)
+	// Wire dev-fallback credentials into the resolver (used when AdminClientSecret is empty).
+	iamResolver.SetPasswordFallback(cfg.Keycloak.AdminUser, cfg.Keycloak.AdminPassword)
 
 	// ── Application Service ───────────────────────────────────────────────────
 	svc := application.NewService(repo, hub, iamResolver)

@@ -40,8 +40,12 @@ type KeycloakConfig struct {
 	// AdminRealm is the realm used to obtain admin access tokens (usually "master").
 	AdminRealm string `mapstructure:"admin_realm"`
 	// AdminClientID and AdminClientSecret are credentials for the admin API client.
+	// In production use client_credentials (set AdminClientSecret).
+	// In local dev use password grant (set AdminUser + AdminPassword, leave AdminClientSecret empty).
 	AdminClientID     string `mapstructure:"admin_client_id"`
 	AdminClientSecret string `mapstructure:"admin_client_secret"`
+	AdminUser         string `mapstructure:"admin_user"`
+	AdminPassword     string `mapstructure:"admin_password"`
 }
 
 type TTLConfig struct {
@@ -66,7 +70,9 @@ func Load() (*Config, error) {
 	v.SetDefault("kafka.topics", []string{"tenant-events", "bpm-events", "crm-events", "iam-events", "notification-commands"})
 	v.SetDefault("keycloak.base_url", "http://localhost:8081")
 	v.SetDefault("keycloak.admin_realm", "master")
-	v.SetDefault("keycloak.admin_client_id", "arda-notification-service")
+	v.SetDefault("keycloak.admin_client_id", "admin-cli")
+	v.SetDefault("keycloak.admin_user", "admin")
+	v.SetDefault("keycloak.admin_password", "admin")
 	v.SetDefault("ttl.retention_days", 30)
 
 	// Environment variables (e.g. DB_HOST -> database.host)
@@ -85,6 +91,8 @@ func Load() (*Config, error) {
 	v.BindEnv("keycloak.admin_realm", "KEYCLOAK_ADMIN_REALM")
 	v.BindEnv("keycloak.admin_client_id", "KEYCLOAK_ADMIN_CLIENT_ID")
 	v.BindEnv("keycloak.admin_client_secret", "KEYCLOAK_ADMIN_CLIENT_SECRET")
+	v.BindEnv("keycloak.admin_user", "KEYCLOAK_ADMIN_USER")
+	v.BindEnv("keycloak.admin_password", "KEYCLOAK_ADMIN_PASSWORD")
 	v.BindEnv("server.port", "PORT")
 
 	// Try loading config file (optional)
