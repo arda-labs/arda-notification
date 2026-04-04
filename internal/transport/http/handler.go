@@ -12,6 +12,9 @@ import (
 	"vn.io.arda/notification/internal/domain"
 )
 
+// Suppress unused import warnings.
+var _ = application.PreferenceUpdateInput{}
+
 // Handler holds all HTTP handler methods.
 type Handler struct {
 	svc *application.Service
@@ -151,6 +154,62 @@ func (h *Handler) Health(c echo.Context) error {
 		"status":           "ok",
 		"sse_clients":       h.hub.ConnectedCount(),
 	})
+}
+
+// --- Preferences Handlers ---
+
+// GetPreferences GET /notifications/preferences
+func (h *Handler) GetPreferences(c echo.Context) error {
+	tenantKey, userID := mustClaims(c)
+
+	prefs, err := h.svc.GetPreferences(c.Request().Context(), tenantKey, userID)
+	if err != nil {
+		return echo.ErrInternalServerError
+	}
+	if prefs == nil {
+		prefs = []domain.Preference{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": prefs})
+}
+
+// UpdatePreferences PUT /notifications/preferences
+func (h *Handler) UpdatePreferences(c echo.Context) error {
+	tenantKey, userID := mustClaims(c)
+
+	var inputs []application.PreferenceUpdateInput
+	if err := c.Bind(&inputs); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if len(inputs) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "no preferences provided")
+	}
+
+	prefs, err := h.svc.UpdatePreferences(c.Request().Context(), tenantKey, userID, inputs)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": prefs})
+}
+
+// --- Action Handlers ---
+
+// ExecuteAction POST /notifications/:id/action
+func (h *Handler) ExecuteAction(c echo.Context) error {
+	tenantKey, userID := mustClaims(c)
+	id := c.Param("id")
+
+	var body struct {
+		ActionIndex int `json:"actionIndex"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+
+	result, err := h.svc.ExecuteAction(c.Request().Context(), id, tenantKey, userID, body.ActionIndex)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
 }
 
 // --- Helpers ---

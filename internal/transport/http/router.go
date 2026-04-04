@@ -41,5 +41,12 @@ func NewRouter(h *Handler, keycloakBaseURL string) *echo.Echo {
 	// SSE endpoint
 	v1.GET("/notifications/stream", h.Stream)
 
+	// Preference endpoints
+	v1.GET("/notifications/preferences", h.GetPreferences)
+	v1.PUT("/notifications/preferences", h.UpdatePreferences)
+
+	// Action endpoint
+	v1.POST("/notifications/:id/action", h.ExecuteAction)
+
 	return e
 }

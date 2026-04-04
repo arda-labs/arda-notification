@@ -65,7 +65,12 @@ func handleDealUpdated(data []byte) *domain.FanoutInput {
 		Type:          domain.TypeCRM,
 		Title:         title,
 		Body:          body,
-		Metadata:      map[string]any{"entityId": env.Payload.EntityID},
+		Metadata: map[string]any{
+			"entityId": env.Payload.EntityID,
+			"actions": []map[string]string{
+				{"label": "Xem deal", "action": "view", "url": "/crm/deals/" + env.Payload.EntityID, "method": "GET", "variant": "primary"},
+			},
+		},
 		SourceEventID: env.EventID,
 	}
 }

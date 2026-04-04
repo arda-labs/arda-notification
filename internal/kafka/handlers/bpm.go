@@ -49,7 +49,13 @@ func handleTaskAssigned(data []byte) *domain.FanoutInput {
 		Type:          domain.TypeWorkflow,
 		Title:         title,
 		Body:          body,
-		Metadata:      map[string]any{"taskId": env.Payload.TaskID, "processName": env.Payload.ProcessName},
+		Metadata: map[string]any{
+			"taskId":      env.Payload.TaskID,
+			"processName": env.Payload.ProcessName,
+			"actions": []map[string]string{
+				{"label": "Xem nhiệm vụ", "action": "view", "url": "/bpm/tasks/" + env.Payload.TaskID, "method": "GET", "variant": "primary"},
+			},
+		},
 		SourceEventID: env.EventID,
 	}
 }
@@ -85,7 +91,14 @@ func handleApprovalRequired(data []byte) *domain.FanoutInput {
 		Type:          domain.TypeWorkflow,
 		Title:         title,
 		Body:          body,
-		Metadata:      map[string]any{"taskId": env.Payload.TaskID, "processName": env.Payload.ProcessName},
+		Metadata: map[string]any{
+			"taskId":      env.Payload.TaskID,
+			"processName": env.Payload.ProcessName,
+			"actions": []map[string]string{
+				{"label": "Phê duyệt", "action": "approve", "url": "/bpm/tasks/" + env.Payload.TaskID + "/approve", "method": "POST", "variant": "primary"},
+				{"label": "Từ chối", "action": "reject", "url": "/bpm/tasks/" + env.Payload.TaskID + "/reject", "method": "POST", "variant": "destructive"},
+			},
+		},
 		SourceEventID: env.EventID,
 	}
 }

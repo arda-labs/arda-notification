@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -86,4 +87,36 @@ type FanoutInput struct {
 	// OriginUserID is the ID of the user who performed the action.
 	// We use this to ensure the performer also receives the notification.
 	OriginUserID string
+}
+
+// Action represents an actionable button attached to a notification.
+// Actions are stored in the notification's metadata under the "actions" key.
+type Action struct {
+	Label   string `json:"label"`            // Display text, e.g. "Approve"
+	Action  string `json:"action"`           // Action identifier, e.g. "approve"
+	URL     string `json:"url"`              // Target URL, e.g. "/api/bpm/v1/tasks/123/approve"
+	Method  string `json:"method"`           // HTTP method: GET, POST, PATCH, DELETE
+	Variant string `json:"variant,omitempty"` // UI style: "primary", "destructive", "outline"
+}
+
+// Actions extracts action buttons from the notification's metadata.
+// Returns nil if no actions are defined.
+func (n *Notification) Actions() []Action {
+	if n.Metadata == nil {
+		return nil
+	}
+	raw, ok := n.Metadata["actions"]
+	if !ok {
+		return nil
+	}
+	// JSON marshal/unmarshal to convert []any → []Action.
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var actions []Action
+	if err := json.Unmarshal(b, &actions); err != nil {
+		return nil
+	}
+	return actions
 }
