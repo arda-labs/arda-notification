@@ -63,6 +63,7 @@ func main() {
 
 	// ── Repository & SSE Hub ─────────────────────────────────────────────────
 	repo := postgres.New(pool)
+	prefRepo := postgres.NewPreferenceRepo(pool)
 	hub := transporthttp.NewHub()
 
 	// ── IAM Resolver (Keycloak Admin API) ─────────────────────────────────────
@@ -76,7 +77,7 @@ func main() {
 	iamResolver.SetPasswordFallback(cfg.Keycloak.AdminUser, cfg.Keycloak.AdminPassword)
 
 	// ── Application Service ───────────────────────────────────────────────────
-	svc := application.NewService(repo, hub, iamResolver)
+	svc := application.NewService(repo, prefRepo, hub, iamResolver)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 	handler := transporthttp.NewHandler(svc, hub)

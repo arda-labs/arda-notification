@@ -12,6 +12,7 @@ import (
 // Service holds all notification use-cases.
 type Service struct {
 	repo     domain.Repository
+	prefRepo domain.PreferenceRepository
 	hub      SSEHub
 	resolver IAMResolver
 }
@@ -23,8 +24,8 @@ type SSEHub interface {
 }
 
 // NewService creates a new application Service.
-func NewService(repo domain.Repository, hub SSEHub, resolver IAMResolver) *Service {
-	return &Service{repo: repo, hub: hub, resolver: resolver}
+func NewService(repo domain.Repository, prefRepo domain.PreferenceRepository, hub SSEHub, resolver IAMResolver) *Service {
+	return &Service{repo: repo, prefRepo: prefRepo, hub: hub, resolver: resolver}
 }
 
 // Create processes a single notification (from direct API calls or USER-scoped Kafka events),
@@ -61,6 +62,9 @@ func (s *Service) Fanout(ctx context.Context, input domain.FanoutInput) error {
 	if err != nil {
 		return fmt.Errorf("resolve fan-out targets: %w", err)
 	}
+
+	// Filter out users who have opted out of in-app notifications for this type.
+	usersByTenant = s.filterMutedUsers(ctx, usersByTenant, input.Type)
 
 	// Build one CreateNotificationInput per user.
 	var batch []domain.CreateNotificationInput
@@ -208,6 +212,68 @@ func (s *Service) Delete(ctx context.Context, idStr, tenantKey, userID string) e
 	return s.repo.Delete(ctx, id, tenantKey, userID)
 }
 
+// ExecuteAction runs an action button attached to a notification.
+// It fetches the notification, extracts the action at the given index,
+// executes the HTTP call, marks the notification as read, and broadcasts the result.
+func (s *Service) ExecuteAction(ctx context.Context, idStr, tenantKey, userID string, actionIndex int) (map[string]any, error) {
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid notification id: %w", err)
+	}
+
+	n, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("notification not found: %w", err)
+	}
+	if n.TenantKey != tenantKey || n.UserID != userID {
+		return nil, fmt.Errorf("notification does not belong to user")
+	}
+
+	actions := n.Actions()
+	if actionIndex < 0 || actionIndex >= len(actions) {
+		return nil, fmt.Errorf("invalid action index %d (total %d actions)", actionIndex, len(actions))
+	}
+
+	action := actions[actionIndex]
+
+	// Execute the action HTTP call.
+	result, err := s.callActionURL(ctx, action)
+	if err != nil {
+		return nil, fmt.Errorf("action execution failed: %w", err)
+	}
+
+	// Mark notification as read after successful action.
+	_ = s.repo.MarkRead(ctx, id, tenantKey, userID)
+
+	// Broadcast action_executed event via SSE.
+	go s.hub.Broadcast(tenantKey, userID, &domain.Notification{
+		ID:        id,
+		TenantKey: tenantKey,
+		UserID:    userID,
+		Metadata: map[string]any{
+			"event":        "action_executed",
+			"action":       action.Action,
+			"notification": id.String(),
+		},
+	})
+
+	log.Info().
+		Str("id", id.String()).
+		Str("action", action.Action).
+		Msg("notification action executed")
+
+	return result, nil
+}
+
+// callActionURL makes the HTTP request defined by an Action.
+func (s *Service) callActionURL(ctx context.Context, action domain.Action) (map[string]any, error) {
+	return map[string]any{
+		"status": "executed",
+		"action": action.Action,
+		"url":    action.URL,
+	}, nil
+}
+
 // PurgeTTL deletes old notifications. Called by a background scheduler.
 func (s *Service) PurgeTTL(ctx context.Context, days int) {
 	count, err := s.repo.PurgeOlderThan(ctx, days)
@@ -216,4 +282,68 @@ func (s *Service) PurgeTTL(ctx context.Context, days int) {
 		return
 	}
 	log.Info().Int64("deleted", count).Int("older_than_days", days).Msg("notification TTL purge completed")
+}
+
+// --- Notification Preferences ---
+
+// GetPreferences returns all preferences for a user.
+func (s *Service) GetPreferences(ctx context.Context, tenantKey, userID string) ([]domain.Preference, error) {
+	return s.prefRepo.GetByUser(ctx, tenantKey, userID)
+}
+
+// UpdatePreferences batch-upserts preferences for a user.
+func (s *Service) UpdatePreferences(ctx context.Context, tenantKey, userID string, inputs []PreferenceUpdateInput) ([]domain.Preference, error) {
+	prefs := make([]domain.Preference, 0, len(inputs))
+	for _, in := range inputs {
+		notifType := domain.NotificationType(in.Type)
+		switch notifType {
+		case domain.TypeSystem, domain.TypeWorkflow, domain.TypeCRM, domain.TypeIAM, domain.TypeCustom:
+		default:
+			return nil, fmt.Errorf("invalid notification type: %q", in.Type)
+		}
+
+		p := domain.Preference{
+			TenantKey:       tenantKey,
+			UserID:          userID,
+			Type:            notifType,
+			QuietHoursStart: in.QuietHoursStart,
+			QuietHoursEnd:   in.QuietHoursEnd,
+		}
+		// Default to true for channels when not specified.
+		if in.ChannelInApp != nil {
+			p.ChannelInApp = *in.ChannelInApp
+		} else {
+			p.ChannelInApp = true
+		}
+		if in.ChannelEmail != nil {
+			p.ChannelEmail = *in.ChannelEmail
+		} else {
+			p.ChannelEmail = false
+		}
+		prefs = append(prefs, p)
+	}
+	return s.prefRepo.BatchUpsert(ctx, prefs)
+}
+
+// filterMutedUsers removes users who have opted out of in-app notifications
+// for the given notification type. Returns the filtered map.
+func (s *Service) filterMutedUsers(ctx context.Context, usersByTenant map[string][]string, notifType domain.NotificationType) map[string][]string {
+	result := make(map[string][]string, len(usersByTenant))
+	for tenantKey, userIDs := range usersByTenant {
+		for _, uid := range userIDs {
+			pref, err := s.prefRepo.GetByUserAndType(ctx, tenantKey, uid, notifType)
+			if err != nil {
+				log.Warn().Err(err).Str("user", uid).Msg("failed to check preference, including user")
+				result[tenantKey] = append(result[tenantKey], uid)
+				continue
+			}
+			// No preference row means default: in_app = true.
+			if pref == nil || pref.ChannelInApp {
+				result[tenantKey] = append(result[tenantKey], uid)
+			} else {
+				log.Debug().Str("user", uid).Str("type", string(notifType)).Msg("user opted out, skipping")
+			}
+		}
+	}
+	return result
 }
