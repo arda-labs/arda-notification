@@ -11,10 +11,11 @@ import (
 
 // Service holds all notification use-cases.
 type Service struct {
-	repo     domain.Repository
-	prefRepo domain.PreferenceRepository
-	hub      SSEHub
-	resolver IAMResolver
+	repo        domain.Repository
+	prefRepo    domain.PreferenceRepository
+	hub         SSEHub
+	resolver    IAMResolver
+	emailSender domain.EmailSender
 }
 
 // SSEHub is the interface for broadcasting to connected SSE clients.
@@ -24,8 +25,8 @@ type SSEHub interface {
 }
 
 // NewService creates a new application Service.
-func NewService(repo domain.Repository, prefRepo domain.PreferenceRepository, hub SSEHub, resolver IAMResolver) *Service {
-	return &Service{repo: repo, prefRepo: prefRepo, hub: hub, resolver: resolver}
+func NewService(repo domain.Repository, prefRepo domain.PreferenceRepository, hub SSEHub, resolver IAMResolver, emailSender domain.EmailSender) *Service {
+	return &Service{repo: repo, prefRepo: prefRepo, hub: hub, resolver: resolver, emailSender: emailSender}
 }
 
 // Create processes a single notification (from direct API calls or USER-scoped Kafka events),
@@ -41,7 +42,11 @@ func (s *Service) Create(ctx context.Context, input domain.CreateNotificationInp
 	}
 
 	// Non-blocking SSE broadcast
-	go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+		go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+		go s.sendEmailIfNeeded(context.Background(), n)
+
+	// Non-blocking email delivery (if user preference allows)
+	go s.sendEmailIfNeeded(ctx, n)
 
 	log.Info().
 		Str("id", n.ID.String()).
@@ -97,7 +102,8 @@ func (s *Service) Fanout(ctx context.Context, input domain.FanoutInput) error {
 
 	for _, n := range insertedResults {
 		// Non-blocking SSE broadcast
-		go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+			go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+		go s.sendEmailIfNeeded(context.Background(), n)
 	}
 
 	log.Info().
@@ -346,4 +352,34 @@ func (s *Service) filterMutedUsers(ctx context.Context, usersByTenant map[string
 		}
 	}
 	return result
+}
+
+// sendEmailIfNeeded checks if the user has email notifications enabled for
+// the notification type and delivers an email asynchronously.
+// Errors are logged but never block the caller.
+func (s *Service) sendEmailIfNeeded(ctx context.Context, n *domain.Notification) {
+	if s.emailSender == nil {
+		return
+	}
+
+	// Check preference
+	pref, err := s.prefRepo.GetByUserAndType(ctx, n.TenantKey, n.UserID, n.Type)
+	if err != nil {
+		log.Warn().Err(err).Str("user", n.UserID).Msg("failed to check email preference")
+		return
+	}
+	if pref == nil || !pref.ChannelEmail {
+		return
+	}
+
+	// Build simple HTML body.
+	html := fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;padding:20px;">
+<div style="max-width:560px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px;">
+<h2 style="margin:0 0 12px;font-size:18px;">%s</h2>
+<p style="font-size:14px;line-height:1.6;">%s</p>
+</div></body></html>`, n.Title, n.Body)
+
+	if err := s.emailSender.Send(ctx, n.UserID, n.Title, html); err != nil {
+		log.Error().Err(err).Str("user", n.UserID).Msg("email delivery failed")
+	}
 }

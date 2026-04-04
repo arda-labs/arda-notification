@@ -269,6 +269,39 @@ func (r *Resolver) listUsers(ctx context.Context, tenantKey string) ([]keycloakU
 	return users, nil
 }
 
+// UserEmail returns the email address for a user in the given realm.
+func (r *Resolver) UserEmail(ctx context.Context, tenantKey, userID string) (string, error) {
+	token, err := r.adminToken(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	url := fmt.Sprintf("%s/admin/realms/%s/users/%s", r.adminURL, tenantKey, userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("keycloak get user %s: %w", userID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak get user %s: status %d", userID, resp.StatusCode)
+	}
+
+	var user struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return "", err
+	}
+	return user.Email, nil
+}
+
 func enabledIDs(users []keycloakUser) []string {
 	ids := make([]string, 0, len(users))
 	for _, u := range users {

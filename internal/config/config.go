@@ -13,6 +13,7 @@ type Config struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	Kafka    KafkaConfig    `mapstructure:"kafka"`
 	Keycloak KeycloakConfig `mapstructure:"keycloak"`
+	Email    EmailConfig    `mapstructure:"email"`
 	TTL      TTLConfig      `mapstructure:"ttl"`
 }
 
@@ -52,6 +53,16 @@ type TTLConfig struct {
 	RetentionDays int `mapstructure:"retention_days"` // Default: 30
 }
 
+type EmailConfig struct {
+	Provider    string `mapstructure:"provider"`     // "smtp" or "log" (dev only)
+	SMTPHost    string `mapstructure:"smtp_host"`
+	SMTPPort    int    `mapstructure:"smtp_port"`
+	SMTPUser    string `mapstructure:"smtp_user"`
+	SMTPPass    string `mapstructure:"smtp_pass"`
+	FromName    string `mapstructure:"from_name"`
+	FromAddress string `mapstructure:"from_address"`
+}
+
 // Load reads configuration from environment variables and config files.
 // Environment variables override file values. Prefix: ARDA_NOTIF_
 func Load() (*Config, error) {
@@ -74,6 +85,9 @@ func Load() (*Config, error) {
 	v.SetDefault("keycloak.admin_user", "admin")
 	v.SetDefault("keycloak.admin_password", "admin")
 	v.SetDefault("ttl.retention_days", 30)
+	v.SetDefault("email.provider", "log")
+	v.SetDefault("email.from_name", "Arda Notification")
+	v.SetDefault("email.from_address", "noreply@arda.io.vn")
 
 	// Environment variables (e.g. DB_HOST -> database.host)
 	v.SetEnvPrefix("ARDA_NOTIF")
@@ -94,6 +108,13 @@ func Load() (*Config, error) {
 	v.BindEnv("keycloak.admin_user", "KEYCLOAK_ADMIN_USER")
 	v.BindEnv("keycloak.admin_password", "KEYCLOAK_ADMIN_PASSWORD")
 	v.BindEnv("server.port", "PORT")
+	v.BindEnv("email.provider", "EMAIL_PROVIDER")
+	v.BindEnv("email.smtp_host", "EMAIL_SMTP_HOST")
+	v.BindEnv("email.smtp_port", "EMAIL_SMTP_PORT")
+	v.BindEnv("email.smtp_user", "EMAIL_SMTP_USER")
+	v.BindEnv("email.smtp_pass", "EMAIL_SMTP_PASS")
+	v.BindEnv("email.from_name", "EMAIL_FROM_NAME")
+	v.BindEnv("email.from_address", "EMAIL_FROM_ADDRESS")
 
 	// Try loading config file (optional)
 	v.SetConfigName("config")

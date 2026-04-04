@@ -14,6 +14,8 @@ import (
 
 	"vn.io.arda/notification/internal/application"
 	"vn.io.arda/notification/internal/config"
+	"vn.io.arda/notification/internal/domain"
+	"vn.io.arda/notification/internal/infrastructure/email"
 	"vn.io.arda/notification/internal/infrastructure/keycloak"
 	"vn.io.arda/notification/internal/infrastructure/postgres"
 	kafkaconsumer "vn.io.arda/notification/internal/kafka"
@@ -76,8 +78,22 @@ func main() {
 	// Wire dev-fallback credentials into the resolver (used when AdminClientSecret is empty).
 	iamResolver.SetPasswordFallback(cfg.Keycloak.AdminUser, cfg.Keycloak.AdminPassword)
 
+	// ── Email Sender ──────────────────────────────────────────────────────────
+	var emailSender domain.EmailSender
+	switch cfg.Email.Provider {
+	case "smtp":
+		emailSender = email.NewSender(
+			cfg.Email.SMTPHost, cfg.Email.SMTPPort,
+			cfg.Email.SMTPUser, cfg.Email.SMTPPass,
+			cfg.Email.FromName, cfg.Email.FromAddress,
+		)
+	default:
+		// "log" provider — dev mode, logs emails instead of sending.
+		emailSender = email.NewLogSender()
+	}
+
 	// ── Application Service ───────────────────────────────────────────────────
-	svc := application.NewService(repo, prefRepo, hub, iamResolver)
+	svc := application.NewService(repo, prefRepo, hub, iamResolver, emailSender)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 	handler := transporthttp.NewHandler(svc, hub)
