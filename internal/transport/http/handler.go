@@ -233,3 +233,47 @@ func buildSSEMessage(n any) []byte {
 	b, _ := json.Marshal(n)
 	return []byte("event: notification\ndata: " + string(b) + "\n\n")
 }
+
+// --- Template Admin Handlers ---
+
+// ListTemplates GET /notifications/admin/templates
+func (h *Handler) ListTemplates(c echo.Context) error {
+	locale := c.QueryParam("locale")
+	if locale == "" {
+		locale = "vi"
+	}
+	templates, err := h.svc.ListTemplates(c.Request().Context(), locale)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if templates == nil {
+		templates = []domain.Template{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": templates})
+}
+
+// UpsertTemplate PUT /notifications/admin/templates
+func (h *Handler) UpsertTemplate(c echo.Context) error {
+	var t domain.Template
+	if err := c.Bind(&t); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if t.TemplateKey == "" || t.Locale == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "template_key and locale are required")
+	}
+	saved, err := h.svc.UpsertTemplate(c.Request().Context(), t)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": saved})
+}
+
+// DeleteTemplate DELETE /notifications/admin/templates/:key/:locale
+func (h *Handler) DeleteTemplate(c echo.Context) error {
+	key := c.Param("key")
+	locale := c.Param("locale")
+	if err := h.svc.DeleteTemplate(c.Request().Context(), key, locale); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}

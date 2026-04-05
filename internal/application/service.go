@@ -11,11 +11,12 @@ import (
 
 // Service holds all notification use-cases.
 type Service struct {
-	repo        domain.Repository
-	prefRepo    domain.PreferenceRepository
-	hub         SSEHub
-	resolver    IAMResolver
-	emailSender domain.EmailSender
+	repo           domain.Repository
+	prefRepo       domain.PreferenceRepository
+	hub            SSEHub
+	resolver       IAMResolver
+	emailSender    domain.EmailSender
+	templateEngine *TemplateEngine
 }
 
 // SSEHub is the interface for broadcasting to connected SSE clients.
@@ -25,8 +26,8 @@ type SSEHub interface {
 }
 
 // NewService creates a new application Service.
-func NewService(repo domain.Repository, prefRepo domain.PreferenceRepository, hub SSEHub, resolver IAMResolver, emailSender domain.EmailSender) *Service {
-	return &Service{repo: repo, prefRepo: prefRepo, hub: hub, resolver: resolver, emailSender: emailSender}
+func NewService(repo domain.Repository, prefRepo domain.PreferenceRepository, hub SSEHub, resolver IAMResolver, emailSender domain.EmailSender, templateEngine *TemplateEngine) *Service {
+	return &Service{repo: repo, prefRepo: prefRepo, hub: hub, resolver: resolver, emailSender: emailSender, templateEngine: templateEngine}
 }
 
 // Create processes a single notification (from direct API calls or USER-scoped Kafka events),
@@ -41,12 +42,9 @@ func (s *Service) Create(ctx context.Context, input domain.CreateNotificationInp
 		return nil, nil
 	}
 
-	// Non-blocking SSE broadcast
-		go s.hub.Broadcast(n.TenantKey, n.UserID, n)
-		go s.sendEmailIfNeeded(context.Background(), n)
-
-	// Non-blocking email delivery (if user preference allows)
-	go s.sendEmailIfNeeded(ctx, n)
+	// Non-blocking SSE broadcast + email delivery
+	go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+	go s.sendEmailIfNeeded(context.Background(), n)
 
 	log.Info().
 		Str("id", n.ID.String()).
@@ -101,8 +99,7 @@ func (s *Service) Fanout(ctx context.Context, input domain.FanoutInput) error {
 	}
 
 	for _, n := range insertedResults {
-		// Non-blocking SSE broadcast
-			go s.hub.Broadcast(n.TenantKey, n.UserID, n)
+		go s.hub.Broadcast(n.TenantKey, n.UserID, n)
 		go s.sendEmailIfNeeded(context.Background(), n)
 	}
 
@@ -122,7 +119,6 @@ func (s *Service) resolveTargets(ctx context.Context, input domain.FanoutInput) 
 
 	switch input.TargetScope {
 	case domain.ScopeUser:
-		// Direct single-user delivery — no IAM call needed.
 		result[input.TenantKey] = []string{input.TargetID}
 
 	case domain.ScopeTenant:
@@ -152,8 +148,7 @@ func (s *Service) resolveTargets(ctx context.Context, input domain.FanoutInput) 
 		return nil, fmt.Errorf("unknown target scope: %q", input.TargetScope)
 	}
 
-	// Post-resolution: Always include the performer (OriginUserID) in the fan-out
-	// if they are not already in the target set.
+	// Post-resolution: Always include the performer (OriginUserID).
 	if input.OriginUserID != "" {
 		found := false
 		for _, uids := range result {
@@ -167,10 +162,8 @@ func (s *Service) resolveTargets(ctx context.Context, input domain.FanoutInput) 
 				break
 			}
 		}
-
 		if !found {
 			log.Debug().Str("user", input.OriginUserID).Msg("adding origin user to fan-out targets")
-			// Add to the action's tenant or "master" by default for admins.
 			tenant := input.TenantKey
 			if tenant == "" {
 				tenant = "master"
@@ -219,8 +212,6 @@ func (s *Service) Delete(ctx context.Context, idStr, tenantKey, userID string) e
 }
 
 // ExecuteAction runs an action button attached to a notification.
-// It fetches the notification, extracts the action at the given index,
-// executes the HTTP call, marks the notification as read, and broadcasts the result.
 func (s *Service) ExecuteAction(ctx context.Context, idStr, tenantKey, userID string, actionIndex int) (map[string]any, error) {
 	id, err := uuid.Parse(idStr)
 	if err != nil {
@@ -241,43 +232,24 @@ func (s *Service) ExecuteAction(ctx context.Context, idStr, tenantKey, userID st
 	}
 
 	action := actions[actionIndex]
-
-	// Execute the action HTTP call.
 	result, err := s.callActionURL(ctx, action)
 	if err != nil {
 		return nil, fmt.Errorf("action execution failed: %w", err)
 	}
 
-	// Mark notification as read after successful action.
 	_ = s.repo.MarkRead(ctx, id, tenantKey, userID)
 
-	// Broadcast action_executed event via SSE.
 	go s.hub.Broadcast(tenantKey, userID, &domain.Notification{
-		ID:        id,
-		TenantKey: tenantKey,
-		UserID:    userID,
-		Metadata: map[string]any{
-			"event":        "action_executed",
-			"action":       action.Action,
-			"notification": id.String(),
-		},
+		ID: id, TenantKey: tenantKey, UserID: userID,
+		Metadata: map[string]any{"event": "action_executed", "action": action.Action},
 	})
 
-	log.Info().
-		Str("id", id.String()).
-		Str("action", action.Action).
-		Msg("notification action executed")
-
+	log.Info().Str("id", id.String()).Str("action", action.Action).Msg("notification action executed")
 	return result, nil
 }
 
-// callActionURL makes the HTTP request defined by an Action.
 func (s *Service) callActionURL(ctx context.Context, action domain.Action) (map[string]any, error) {
-	return map[string]any{
-		"status": "executed",
-		"action": action.Action,
-		"url":    action.URL,
-	}, nil
+	return map[string]any{"status": "executed", "action": action.Action, "url": action.URL}, nil
 }
 
 // PurgeTTL deletes old notifications. Called by a background scheduler.
@@ -315,7 +287,6 @@ func (s *Service) UpdatePreferences(ctx context.Context, tenantKey, userID strin
 			QuietHoursStart: in.QuietHoursStart,
 			QuietHoursEnd:   in.QuietHoursEnd,
 		}
-		// Default to true for channels when not specified.
 		if in.ChannelInApp != nil {
 			p.ChannelInApp = *in.ChannelInApp
 		} else {
@@ -331,8 +302,7 @@ func (s *Service) UpdatePreferences(ctx context.Context, tenantKey, userID strin
 	return s.prefRepo.BatchUpsert(ctx, prefs)
 }
 
-// filterMutedUsers removes users who have opted out of in-app notifications
-// for the given notification type. Returns the filtered map.
+// filterMutedUsers removes users who have opted out of in-app notifications.
 func (s *Service) filterMutedUsers(ctx context.Context, usersByTenant map[string][]string, notifType domain.NotificationType) map[string][]string {
 	result := make(map[string][]string, len(usersByTenant))
 	for tenantKey, userIDs := range usersByTenant {
@@ -343,26 +313,19 @@ func (s *Service) filterMutedUsers(ctx context.Context, usersByTenant map[string
 				result[tenantKey] = append(result[tenantKey], uid)
 				continue
 			}
-			// No preference row means default: in_app = true.
 			if pref == nil || pref.ChannelInApp {
 				result[tenantKey] = append(result[tenantKey], uid)
-			} else {
-				log.Debug().Str("user", uid).Str("type", string(notifType)).Msg("user opted out, skipping")
 			}
 		}
 	}
 	return result
 }
 
-// sendEmailIfNeeded checks if the user has email notifications enabled for
-// the notification type and delivers an email asynchronously.
-// Errors are logged but never block the caller.
+// sendEmailIfNeeded checks email preference and delivers asynchronously.
 func (s *Service) sendEmailIfNeeded(ctx context.Context, n *domain.Notification) {
 	if s.emailSender == nil {
 		return
 	}
-
-	// Check preference
 	pref, err := s.prefRepo.GetByUserAndType(ctx, n.TenantKey, n.UserID, n.Type)
 	if err != nil {
 		log.Warn().Err(err).Str("user", n.UserID).Msg("failed to check email preference")
@@ -372,7 +335,6 @@ func (s *Service) sendEmailIfNeeded(ctx context.Context, n *domain.Notification)
 		return
 	}
 
-	// Build simple HTML body.
 	html := fmt.Sprintf(`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;padding:20px;">
 <div style="max-width:560px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px;">
 <h2 style="margin:0 0 12px;font-size:18px;">%s</h2>
@@ -382,4 +344,39 @@ func (s *Service) sendEmailIfNeeded(ctx context.Context, n *domain.Notification)
 	if err := s.emailSender.Send(ctx, n.UserID, n.Title, html); err != nil {
 		log.Error().Err(err).Str("user", n.UserID).Msg("email delivery failed")
 	}
+}
+
+// --- Template Management ---
+
+// RenderTemplate renders a notification template with variables.
+func (s *Service) RenderTemplate(ctx context.Context, key, locale string, vars map[string]string, fallbackTitle, fallbackBody string) (string, string) {
+	if s.templateEngine == nil {
+		return fallbackTitle, fallbackBody
+	}
+	title, body, _ := s.templateEngine.Render(ctx, key, locale, vars, fallbackTitle, fallbackBody)
+	return title, body
+}
+
+// ListTemplates returns all templates for a locale.
+func (s *Service) ListTemplates(ctx context.Context, locale string) ([]domain.Template, error) {
+	if s.templateEngine == nil {
+		return nil, fmt.Errorf("template engine not configured")
+	}
+	return s.templateEngine.GetTemplates(ctx, locale)
+}
+
+// UpsertTemplate creates or updates a template.
+func (s *Service) UpsertTemplate(ctx context.Context, t domain.Template) (*domain.Template, error) {
+	if s.templateEngine == nil {
+		return nil, fmt.Errorf("template engine not configured")
+	}
+	return s.templateEngine.UpsertTemplate(ctx, t)
+}
+
+// DeleteTemplate removes a template.
+func (s *Service) DeleteTemplate(ctx context.Context, key, locale string) error {
+	if s.templateEngine == nil {
+		return fmt.Errorf("template engine not configured")
+	}
+	return s.templateEngine.DeleteTemplate(ctx, key, locale)
 }

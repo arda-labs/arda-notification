@@ -66,7 +66,11 @@ func main() {
 	// ── Repository & SSE Hub ─────────────────────────────────────────────────
 	repo := postgres.New(pool)
 	prefRepo := postgres.NewPreferenceRepo(pool)
+	templateRepo := postgres.NewTemplateRepo(pool)
 	hub := transporthttp.NewHub()
+
+	// ── Template Engine ────────────────────────────────────────────────────────
+	templateEngine := application.NewTemplateEngine(templateRepo, "vi")
 
 	// ── IAM Resolver (Keycloak Admin API) ─────────────────────────────────────
 	iamResolver := keycloak.New(
@@ -93,7 +97,7 @@ func main() {
 	}
 
 	// ── Application Service ───────────────────────────────────────────────────
-	svc := application.NewService(repo, prefRepo, hub, iamResolver, emailSender)
+	svc := application.NewService(repo, prefRepo, hub, iamResolver, emailSender, templateEngine)
 
 	// ── HTTP Server ───────────────────────────────────────────────────────────
 	handler := transporthttp.NewHandler(svc, hub)

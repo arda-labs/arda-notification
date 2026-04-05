@@ -48,5 +48,10 @@ func NewRouter(h *Handler, keycloakBaseURL string) *echo.Echo {
 	// Action endpoint
 	v1.POST("/notifications/:id/action", h.ExecuteAction)
 
+	// Template admin endpoints
+	v1.GET("/notifications/admin/templates", h.ListTemplates)
+	v1.PUT("/notifications/admin/templates", h.UpsertTemplate)
+	v1.DELETE("/notifications/admin/templates/:key/:locale", h.DeleteTemplate)
+
 	return e
 }
